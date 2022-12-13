@@ -7,9 +7,9 @@ from sklearn.model_selection import train_test_split
 
 # file path
 # 낙엽송 
-larch = "./larch/"
+larch = "./dataset/larch/"
 # 잣나무
-pine = "./pine/"
+pine = "./dataset/pine/"
 
 # slow is 0, fast is 1
 def make_dataframe(path, species):
@@ -29,7 +29,7 @@ larch_train, larch_val, larch_test = make_dataframe(larch, "larch")
 pine_train, pine_val, pine_test = make_dataframe(pine, "pine")
 
 # train file
-f = open("./Sample/train.txt", 'w')
+f = open("./dataset/train.txt", 'w')
 for i in larch_train:
     f.write(i)
 
@@ -38,7 +38,7 @@ for i in pine_train:
 f.close()
 
 # valid file
-f = open("./Sample/valid.txt", 'w')
+f = open("./dataset/valid.txt", 'w')
 for i in larch_val:
     f.write(i)
 
@@ -47,7 +47,7 @@ for i in pine_val:
 f.close()
 
 # test file
-f = open("./Sample/test.txt", 'w')
+f = open("./dataset/test.txt", 'w')
 for i in larch_test:
     f.write(i)
 

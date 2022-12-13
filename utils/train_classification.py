@@ -13,8 +13,11 @@ import torch.utils.data
 from pointnet.dataset import ShapeNetDataset, ModelNetDataset, TreeDataset
 from pointnet.model import PointNetCls, feature_transform_regularizer
 import torch.nn.functional as F
-from tqdm import tqdm
+
 from multiprocessing import freeze_support
+
+from torch.utils.tensorboard import SummaryWriter
+from sklearn.metrics import roc_auc_score
 
 if __name__=='__main__':
     freeze_support()
@@ -32,6 +35,7 @@ if __name__=='__main__':
     parser.add_argument('--dataset', type=str, required=True, help="dataset path")
     parser.add_argument('--dataset_type', type=str, default='shapenet', help="dataset type shapenet|modelnet40")
     parser.add_argument('--feature_transform', action='store_true', help="use feature transform")
+    parser.add_argument('-train', action='store_true', help="model train")
 
     opt = parser.parse_args()
     print(opt)
@@ -67,33 +71,46 @@ if __name__=='__main__':
             npoints=opt.num_points,
             data_augmentation=False)
     elif opt.dataset_type == 'tree':
-        dataset = TreeDataset(
+        train_dataset = TreeDataset(
             root=opt.dataset,
             npoints=opt.num_points,
-            split='trainval')
+            split='train')
 
+        valid_dataset = TreeDataset(
+            root=opt.dataset,
+            split='valid',
+            npoints=opt.num_points,
+            data_augmentation=False)
+        
         test_dataset = TreeDataset(
             root=opt.dataset,
-            split='trainval',
+            split='test',
             npoints=opt.num_points,
             data_augmentation=False)
     else:
         exit('wrong dataset type')
 
-    dataloader = torch.utils.data.DataLoader(
-        dataset,
+    train_dataloader = torch.utils.data.DataLoader(
+        train_dataset,
         batch_size=opt.batchSize,
         shuffle=True,
         num_workers=int(opt.workers))
 
-    testdataloader = torch.utils.data.DataLoader(
+    valid_dataloader = torch.utils.data.DataLoader(
+        valid_dataset,
+        batch_size=opt.batchSize,
+        shuffle=True,
+        num_workers=int(opt.workers))
+
+    test_dataloader = torch.utils.data.DataLoader(
             test_dataset,
             batch_size=opt.batchSize,
             shuffle=True,
             num_workers=int(opt.workers))
 
-    print(len(dataset), len(test_dataset))
-    num_classes = len(dataset.classes)
+    print("train:", len(train_dataloader), "valid:", len(valid_dataloader), "test:", len(test_dataloader))
+
+    num_classes = len(train_dataset.classes)
     print('classes', num_classes)
 
     try:
@@ -111,11 +128,14 @@ if __name__=='__main__':
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.5)
     classifier.cuda()
 
-    num_batch = len(dataset) / opt.batchSize
+    num_batch = len(train_dataset) / opt.batchSize
 
+writer = SummaryWriter()
+if opt.train:
     for epoch in range(opt.nepoch):
         scheduler.step()
-        for i, data in enumerate(dataloader, 0):
+        for i, data in enumerate(train_dataloader, 0):
+
             points, target = data
             target = target[:, 0]
             points = points.transpose(2, 1)
@@ -130,26 +150,52 @@ if __name__=='__main__':
             optimizer.step()
             pred_choice = pred.data.max(1)[1]
             correct = pred_choice.eq(target.data).cpu().sum()
-            print('[%d: %d/%d] train loss: %f accuracy: %f' % (epoch, i, num_batch, loss.item(), correct.item() / float(opt.batchSize)))
 
-            # if i % 10 == 0:
-            #     j, data = next(enumerate(testdataloader, 0))
-            #     points, target = data
-            #     target = target[:, 0]
-            #     points = points.transpose(2, 1)
-            #     points, target = points.cuda(), target.cuda()
-            #     classifier = classifier.eval()
-            #     pred, _, _ = classifier(points)
-            #     loss = F.nll_loss(pred, target)
-            #     pred_choice = pred.data.max(1)[1]
-            #     correct = pred_choice.eq(target.data).cpu().sum()
-            #     print('[%d: %d/%d] %s loss: %f accuracy: %f' % (epoch, i, num_batch, blue('test'), loss.item(), correct.item()/float(opt.batchSize)))
+        writer.add_scalar("loss/train", loss.item(), epoch)
+        writer.add_scalar("accuracy/train", correct.item() / float(opt.batchSize), epoch)
 
-        torch.save(classifier.state_dict(), '%s/cls_model_%d.pth' % (opt.outf, epoch))
+        print('[%d] train loss: %f accuracy: %f AUC: %f' % (epoch, loss.item(), correct.item() / float(opt.batchSize), roc_auc_score(target.detach().cpu(), pred_choice.detach().cpu())))
 
+
+        valid_correct = 0
+        valid_testset = 0
+
+        for i,data in enumerate(valid_dataloader, 0):
+            points, target = data
+            target = target[:, 0]
+            points = points.transpose(2, 1)
+            points, target = points.cuda(), target.cuda()
+            classifier = classifier.eval()
+            pred, _, _ = classifier(points)
+            pred_choice = pred.data.max(1)[1]
+            correct = pred_choice.eq(target.data).cpu().sum()
+
+            loss = F.nll_loss(pred, target)
+            if opt.feature_transform:
+                loss += feature_transform_regularizer(trans_feat) * 0.001
+
+            valid_correct += correct.item()
+            valid_testset += points.size()[0]
+
+        writer.add_scalar("loss/valid", loss.item(), epoch)
+        writer.add_scalar("accuracy/valid", valid_correct / float(valid_testset), epoch)
+        
+        print('[%d] valid loss: %f accuracy: %f AUC: %f' % (epoch, loss.item(), valid_correct / float(valid_testset), roc_auc_score(target.detach().cpu(), pred_choice.detach().cpu())))
+
+        if best_loss > loss:
+            best_loss = loss
+            torch.save(classifier.state_dict(), '%s/best_cls_model.pth' % (opt.outf))
+
+else:
     total_correct = 0
     total_testset = 0
-    for i,data in tqdm(enumerate(testdataloader, 0)):
+
+    pred_list = []
+    target_list = []
+
+    classifier.load_state_dict(torch.load(opt.outf+'/best_cls_model.pth'))
+
+    for i,data in enumerate(test_dataloader, 0):
         points, target = data
         target = target[:, 0]
         points = points.transpose(2, 1)
@@ -158,7 +204,14 @@ if __name__=='__main__':
         pred, _, _ = classifier(points)
         pred_choice = pred.data.max(1)[1]
         correct = pred_choice.eq(target.data).cpu().sum()
+
+        pred_list += pred_choice.tolist()
+        target_list += target.tolist()
+
         total_correct += correct.item()
         total_testset += points.size()[0]
 
     print("final accuracy {}".format(total_correct / float(total_testset)))
+    print('AUC {}'.format(roc_auc_score(target.detach().cpu(), pred_choice.detach().cpu())))
+
+print("Done")
